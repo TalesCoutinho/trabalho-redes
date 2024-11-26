@@ -1,37 +1,26 @@
 #!/bin/bash
 
-# Note: Mininet must be run as root. Invoke this shell script using sudo.
-
-time=90
-bwnet=1.5
-delay="10ms"  # Atraso por link (ida e volta soma 20ms)
-iperf_port=5001
-
-# Lista de tamanhos de buffer a testar
+# Parâmetros do experimento
 queue_sizes=(20 40 80 100)
+output_dir="resultados_extremos"
+
+# Garantir que a pasta de saída exista
+mkdir -p "$output_dir"
 
 for qsize in "${queue_sizes[@]}"; do
-    dir=bb-q$qsize
+    dir="$output_dir/bb-q$qsize"
+    mkdir -p "$dir"
 
-    # Criar o diretório de saída se não existir
-    mkdir -p $dir
+    echo "Executando experimento para fila $qsize..."
 
-    echo "Running experiment with queue size $qsize..."
+    # Executar o experimento com bufferbloat_extremos.py
+    sudo python3 bufferbloat_extremos.py --queue "$qsize" --bw 0.1 --delay "100ms" --time 30 --output "$dir"
 
-    # Executar o bufferbloat.py
-    sudo python3 bufferbloat.py --queue $qsize --bw $bwnet --delay $delay --time $time --output $dir
+    echo "Gerando gráficos para fila $qsize..."
 
-    echo "Experiment completed for queue size $qsize. Generating plots..."
-
-    # Gerar gráfico de RTT
-    python3 plot_ping.py -f $dir/ping.txt -o $dir/reno-rtt-q$qsize.png
-
-    # Gerar gráfico do tamanho da fila
-    python3 plot_queue.py -f $dir/q.txt -o $dir/reno-buffer-q$qsize.png
-
-    echo "Plots generated for queue size $qsize:"
-    echo "  RTT plot: $dir/reno-rtt-q$qsize.png"
-    echo "  Buffer plot: $dir/reno-buffer-q$qsize.png"
+    # Gerar gráficos
+    python3 plot_queue.py -f "$dir/q.txt" -o "$dir/reno-buffer-q$qsize.png"
+    python3 plot_ping.py -f "$dir/ping.txt" -o "$dir/reno-rtt-q$qsize.png"
 done
 
-echo "All experiments completed. Results stored in respective directories."
+echo "Todos os experimentos concluídos. Resultados salvos em $output_dir."

@@ -1,30 +1,30 @@
-from time import sleep, time
-from subprocess import *
-import re
+import os
+import time
+import argparse
 
-default_dir = '.'
+def monitor_queue(interface, output_file, interval):
+    """
+    Monitora o tamanho da fila (backlog) da interface especificada.
+    """
+    print(f"Monitorando a interface {interface}. Salvando em {output_file}")
+    with open(output_file, 'w') as f:
+        while True:
+            try:
+                cmd = f"tc -s qdisc show dev {interface} | grep backlog"
+                result = os.popen(cmd).read()
+                if result:
+                    f.write(result + '\n')
+                    f.flush()
+                time.sleep(interval)
+            except KeyboardInterrupt:
+                print("Monitoramento interrompido.")
+                break
 
-def monitor_qlen(iface, interval_sec = 0.01, fname='%s/qlen.txt' % default_dir):
-    pat_queued = re.compile(rb'backlog\s[^\s]+\s([\d]+)p')
-    cmd = "tc -s qdisc show dev %s" % (iface)
-    ret = []
-    open(fname, 'w').write('')
-    while 1:
-        p = Popen(cmd, shell=True, stdout=PIPE)
-        output = p.stdout.read()
-        # Not quite right, but will do for now
-        matches = pat_queued.findall(output)
-        if matches and len(matches) > 1:
-            ret.append(matches[1])
-            t = "%f" % time()
-            open(fname, 'a').write('{},{}\n'.format(t, matches[1].decode('utf-8')))
-        sleep(interval_sec)
-    #open('qlen.txt', 'w').write('\n'.join(ret))
-    return
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Monitoramento do tamanho da fila.")
+    parser.add_argument('--interface', required=True, help="Interface a ser monitorada (ex.: s1-eth2)")
+    parser.add_argument('--output', required=True, help="Arquivo de saída para salvar os dados")
+    parser.add_argument('--interval', type=float, default=0.1, help="Intervalo entre medições (em segundos)")
+    args = parser.parse_args()
 
-def monitor_devs_ng(fname="%s/txrate.txt" % default_dir, interval_sec=0.01):
-    """Uses bwm-ng tool to collect iface tx rate stats.  Very reliable."""
-    cmd = ("sleep 1; bwm-ng -t %s -o csv "
-           "-u bits -T rate -C ',' > %s" %
-           (interval_sec * 1000, fname))
-    Popen(cmd, shell=True).wait()
+    monitor_queue(args.interface, args.output, args.interval)

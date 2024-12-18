@@ -1,34 +1,80 @@
-import matplotlib.pyplot as plt
-import argparse
+'''
+Plot queue occupancy over time
+'''
+from helper import *
+import plot_defaults
 
-def col(n, data):
-    """
-    Retorna a coluna `n` dos dados, ignorando linhas inválidas.
-    """
-    for item in data:
-        try:
-            yield float(item[n])  # Converte para float
-        except (IndexError, ValueError):
-            continue
+from matplotlib.ticker import MaxNLocator
+from pylab import figure
 
-# Configuração de argumentos
-parser = argparse.ArgumentParser(description="Plot Buffer Queue Length")
-parser.add_argument("-f", "--file", required=True, help="Input file containing queue data")
-parser.add_argument("-o", "--output", required=True, help="Output image file")
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--files', '-f',
+                    help="Queue timeseries output to one plot",
+                    required=True,
+                    action="store",
+                    nargs='+',
+                    dest="files")
+
+parser.add_argument('--legend', '-l',
+                    help="Legend to use if there are multiple plots.  File names used as default.",
+                    action="store",
+                    nargs="+",
+                    default=None,
+                    dest="legend")
+
+parser.add_argument('--out', '-o',
+                    help="Output png file for the plot.",
+                    default=None, # Will show the plot
+                    dest="out")
+
+parser.add_argument('--labels',
+                    help="Labels for x-axis if summarising; defaults to file names",
+                    required=False,
+                    default=[],
+                    nargs="+",
+                    dest="labels")
+
+parser.add_argument('--every',
+                    help="If the plot has a lot of data points, plot one of every EVERY (x,y) point (default 1).",
+                    default=1,
+                    type=int)
+
 args = parser.parse_args()
 
-# Ler arquivo de dados
-with open(args.file) as f:
-    data = [line.split() for line in f if line.strip()]  # Ignora linhas vazias
+if args.legend is None:
+    args.legend = []
+    for file in args.files:
+        args.legend.append(file)
 
-# Extração de valores
-qlens = list(map(float, col(0, data)))  # Extraindo apenas a primeira coluna
+to_plot=[]
+def get_style(i):
+    if i == 0:
+        return {'color': 'red'}
+    else:
+        return {'color': 'black', 'ls': '-.'}
 
-# Gerar o gráfico
-plt.plot(qlens)
-plt.title("Tamanho da Fila (Buffer)")
-plt.xlabel("Tempo (amostras)")
-plt.ylabel("Tamanho da Fila (bytes)")
-plt.grid()
-plt.savefig(args.output)
-plt.close()
+m.rc('figure', figsize=(16, 6))
+fig = figure()
+ax = fig.add_subplot(111)
+for i, f in enumerate(args.files):
+    data = read_list(f)
+    xaxis = list(map(float, list(col(0, data))))
+    start_time = xaxis[0]
+    xaxis = list(map(lambda x: x - start_time, xaxis))
+    qlens = list(map(float, col(1, data)))
+
+    xaxis = xaxis[::args.every]
+    qlens = qlens[::args.every]
+    ax.plot(xaxis, qlens, label=args.legend[i], lw=2, **get_style(i))
+    ax.xaxis.set_major_locator(MaxNLocator(4))
+
+plt.ylabel("Packets")
+plt.grid(True)
+plt.xlabel("Seconds")
+
+if args.out:
+    print('saving to', args.out)
+    plt.savefig(args.out)
+else:
+    plt.show()

@@ -1,90 +1,181 @@
 from mininet.topo import Topo
-from mininet.net import Mininet
-from mininet.node import Controller
+from mininet.node import CPULimitedHost
 from mininet.link import TCLink
-import time
+from mininet.net import Mininet
+from mininet.log import lg, info
+from mininet.util import dumpNodeConnections
+from mininet.cli import CLI
+
+from subprocess import Popen, PIPE
+from time import sleep, time
+from multiprocessing import Process
+from argparse import ArgumentParser
+
+from monitor import monitor_qlen
+
+import sys
 import os
+import math
+
+quiche_client = "cargo run --manifest-path /mnt/work/quiche/Cargo.toml --bin quiche-client --" 
+quiche_server = "cargo run --manifest-path /mnt/work/quiche/Cargo.toml --bin quiche-server --" 
+
+parser = ArgumentParser(description="Bufferbloat tests")
+parser.add_argument('--bw-host', '-B',
+                    type=float,
+                    help="Bandwidth of host links (Mb/s)",
+                    default=1000)
+
+parser.add_argument('--bw-net', '-b',
+                    type=float,
+                    help="Bandwidth of bottleneck (network) link (Mb/s)",
+                    required=True)
+
+parser.add_argument('--delay',
+                    type=float,
+                    help="Link propagation delay (ms)",
+                    required=True)
+
+parser.add_argument('--dir', '-d',
+                    help="Directory to store outputs",
+                    required=True)
+
+parser.add_argument('--time', '-t',
+                    help="Duration (sec) to run the experiment",
+                    type=int,
+                    default=10)
+
+parser.add_argument('--maxq',
+                    type=int,
+                    help="Max buffer size of network interface in packets",
+                    default=100)
+
+# Linux uses CUBIC-TCP by default that doesn't have the usual sawtooth
+# behaviour.  For those who are curious, invoke this script with
+# --cong cubic and see what happens...
+# sysctl -a | grep cong should list some interesting parameters.
+parser.add_argument('--cong',
+                    help="Congestion control algorithm to use",
+                    default="reno")
+
+# Expt parameters
+args = parser.parse_args()
 
 class BBTopo(Topo):
-    """
-    Topologia do experimento bufferbloat:
-    - h1 conectado ao roteador com alta largura de banda.
-    - h2 conectado ao roteador com largura de banda limitada.
-    """
-    def build(self, bw, delay, queue_size):
+    "Simple topology for bufferbloat experiment."
+
+    def build(self, n=2):
         # Adicionando hosts
         h1 = self.addHost('h1')
         h2 = self.addHost('h2')
-        # Adicionando roteador como switch
-        router = self.addSwitch('s1')
+
+        # Here I have created a switch.  If you change its name, its
+        # interface names will change from s0-eth1 to newname-eth1.
+        router = self.addSwitch('s0')
 
         # Link rápido entre h1 e o roteador
-        self.addLink(h1, router, bw=1000)
+        self.addLink(h1, router, bw=args.bw_host, delay='0ms', use_htb=True)
 
         # Link lento entre o roteador e h2
-        self.addLink(router, h2, bw=bw, delay=delay, max_queue_size=queue_size, use_htb=True)
+        self.addLink(router, h2, bw=args.bw_net, delay=f'{args.delay}ms', max_queue_size=args.maxq, use_htb=True)
 
-def parse_backlog(line):
-    """
-    Extrai os valores numéricos de backlog de uma linha do comando `tc`.
-    """
-    parts = line.split()
-    if "backlog" in parts:
-        try:
-            return int(parts[parts.index("backlog") + 1].replace("b", ""))  # Extrai o valor numérico
-        except (ValueError, IndexError):
-            return 0
-    return 0
+# Simple wrappers around monitoring utilities.  You are welcome to
+# contribute neatly written (using classes) monitoring scripts for
+# Mininet!
 
-if __name__ == '__main__':
-    # Parâmetros para resultados extremos
-    queue_sizes = [20, 40, 80, 100]
-    bw = 0.1  # Largura de banda fixa em 0.1 Mbps
-    delay = "100ms"  # Atraso fixo de 100 ms
-    time_duration = 30  # Duração do experimento em segundos
-    output_base_dir = "resultados_extremos"
+def start_iperf(net):
+    if args.cong == "quic": 
+        return
+    h1 = net.get('h1')
+    h2 = net.get('h2')
+    print("Starting iperf server...")
+    server = h2.popen("iperf -s -w 16m")
 
-    # Criar pasta principal para resultados
-    if not os.path.exists(output_base_dir):
-        os.makedirs(output_base_dir)
+    print("Starting iperf client on h1...")
+    client = h1.popen(f"iperf -c {h2.IP()} -t {args.time} -w 16m")
 
-    for queue_size in queue_sizes:
-        output_dir = f"{output_base_dir}/bb-q{queue_size}"
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+    return server, client
+    
+def start_qmon(iface, interval_sec=0.1, outfile="q.txt"):
+    monitor = Process(target=monitor_qlen,
+                      args=(iface, interval_sec, outfile))
+    monitor.start()
+    return monitor
 
-        print(f"*** Executando experimento para tamanho de fila {queue_size}...")
+def start_ping(net):
+    h1 = net.get('h1')
+    h2 = net.get('h2')
 
-        # Criar topologia e iniciar rede
-        topo = BBTopo(bw=bw, delay=delay, queue_size=queue_size)
-        net = Mininet(topo=topo, link=TCLink, controller=Controller)
-        net.start()
+    print("Starting ping from h1 to h2...")
+    h1.popen(f"ping -i 0.1 {h2.IP()} > {args.dir}/ping.txt", shell=True)
 
-        # Testar conectividade
-        print("*** Testando conectividade...")
-        net.pingAll()
+def start_webserver(net):
+    if (args.cong == "quic"):
+        return start_quic_server(net)
 
-        # Obter hosts
-        h1 = net.get('h1')
-        h2 = net.get('h2')
+    h1 = net.get('h1')
+    proc = h1.popen("python webserver.py", shell=True)
+    sleep(1)
+    return [proc]
 
-        # Iniciar sequência de pings para medir RTT
-        print("*** Iniciando sequência de pings para medir RTT...")
-        ping_count = min(time_duration * 10, 100)  # Limita para no máximo 100 pings
-        h1.cmd(f"ping -c {ping_count} 10.0.0.2 > {output_dir}/ping.txt")
-        print("*** Sequência de pings concluída.")
+def start_quic_server(net):
+    h1 = net.get('h1')
+    print("Starting QUIC webserver on h1...")
+    proc = h1.popen(f"{quiche_server} --listen {h1.IP()}:4433 --root ./", shell=True) 
+    sleep(1)
+    return [proc]
 
-        # Monitorar backlog
-        print("*** Iniciando monitoramento do tamanho da fila...")
-        with open(f"{output_dir}/q.txt", 'w') as f:
-            for _ in range(time_duration * 10):  # Monitorar por toda a duração do experimento
-                monitor_cmd = "tc -s qdisc show dev s1-eth2 | grep backlog"
-                output = os.popen(monitor_cmd).read().strip()
-                backlog_value = parse_backlog(output)
-                f.write(f"{backlog_value}\n")
-                time.sleep(0.1)
+def measure_webpage_transfer(net):
+    h2 = net.get('h2')
+    fetch_times = []
 
-        print(f"*** Experimento para fila {queue_size} concluído. Resultados salvos em {output_dir}")
+    time_left = args.time
+    while time_left > 0:
 
-        # Finalizar rede
-        net.stop()
+        for _ in range(3):
+            print("Starting to download index.html...")
+            start_time = time()
+            if args.cong == "quic":
+                response = h2.cmd(f"{quiche_client} https://{net.get('h1').IP()}:4433/index.html")
+            else:
+                response = h2.cmd(f"curl -o /dev/null -s -w '%{{time_total}}\\n' {net.get('h1').IP()}/index.html")
+            delta = time() - start_time
+
+            print(f"Response: {response}")
+
+            fetch_times.append(delta)
+
+            time_left -= delta
+
+    return fetch_times
+
+def bufferbloat():
+    if not os.path.exists(args.dir):
+        os.makedirs(args.dir)
+    os.system("sysctl -w net.ipv4.tcp_congestion_control=%s" % args.cong)
+    topo = BBTopo()
+    net = Mininet(topo=topo, host=CPULimitedHost, link=TCLink)
+    net.start()
+    dumpNodeConnections(net.hosts)
+    net.pingAll()
+
+    qmon = start_qmon(iface='s0-eth2', outfile='%s/q.txt' % (args.dir))
+
+    start_iperf(net)
+    start_ping(net)
+    start_webserver(net)
+    fetch_times = measure_webpage_transfer(net)
+
+    qmon.terminate()
+    net.stop()
+
+    avg_time = sum(fetch_times) / len(fetch_times) * 1000
+    std_dev = math.sqrt(sum((x - avg_time) ** 2 for x in fetch_times) / len(fetch_times)) * 1000
+    
+    avg = f"[{args.cong}-q{args.maxq}] Average fetch time : {avg_time:.2f}ms, Std Dev: {std_dev:.2f}ms"
+    print(avg)
+    os.system(f"echo '{avg}' >> {args.dir}/../curl_times.txt")
+    Popen("pgrep -f webserver.py | xargs kill -9", shell=True).wait()
+
+if __name__ == "__main__":
+    bufferbloat()

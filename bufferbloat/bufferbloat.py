@@ -17,9 +17,6 @@ import sys
 import os
 import math
 
-quiche_client = "cargo run --manifest-path /mnt/work/quiche/Cargo.toml --bin quiche-client --" 
-quiche_server = "cargo run --manifest-path /mnt/work/quiche/Cargo.toml --bin quiche-server --" 
-
 parser = ArgumentParser(description="Bufferbloat tests")
 parser.add_argument('--bw-host', '-B',
                     type=float,
@@ -121,7 +118,7 @@ def start_webserver(net):
 def start_quic_server(net):
     h1 = net.get('h1')
     print("Starting QUIC webserver on h1...")
-    proc = h1.popen(f"{quiche_server} --listen {h1.IP()}:4433 --root ./", shell=True) 
+    proc = h1.popen(f"./.quiche/bin/quiche-server --listen {h1.IP()}:4433 --root . --cert cert.pem --key key.pem", shell=True)
     sleep(1)
     return [proc]
 
@@ -129,19 +126,17 @@ def measure_webpage_transfer(net):
     h2 = net.get('h2')
     fetch_times = []
 
+    print("Measuring webpage...")
     time_left = args.time
     while time_left > 0:
 
         for _ in range(3):
-            print("Starting to download index.html...")
             start_time = time()
             if args.cong == "quic":
-                response = h2.cmd(f"{quiche_client} https://{net.get('h1').IP()}:4433/index.html")
+                response = h2.cmd(f"./.quiche/bin/quiche-client --no-verify https://{net.get('h1').IP()}:4433/index.html")
             else:
                 response = h2.cmd(f"curl -o /dev/null -s -w '%{{time_total}}\\n' {net.get('h1').IP()}/index.html")
             delta = time() - start_time
-
-            print(f"Response: {response}")
 
             fetch_times.append(delta)
 
@@ -152,7 +147,8 @@ def measure_webpage_transfer(net):
 def bufferbloat():
     if not os.path.exists(args.dir):
         os.makedirs(args.dir)
-    os.system("sysctl -w net.ipv4.tcp_congestion_control=%s" % args.cong)
+    if args.cong != 'quic':
+        os.system("sysctl -w net.ipv4.tcp_congestion_control=%s" % args.cong)
     topo = BBTopo()
     net = Mininet(topo=topo, host=CPULimitedHost, link=TCLink)
     net.start()
